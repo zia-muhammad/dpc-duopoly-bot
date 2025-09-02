@@ -1,4 +1,3 @@
-# duopoly.py
 from typing import Any, Optional, Tuple, Union, List, Iterable
 import numpy as np
 
@@ -117,6 +116,55 @@ class OnlineOLS3:
         except Exception:
             return None
 
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, float(x)))
+
+
+EPS_MIN: float = 0.05  # exploration floor
+
+
+def choose_price(
+    ols: OnlineOLS3,
+    competitor_price: Optional[float],
+    competitor_has_capacity: bool,
+    last_price: Optional[float],
+    n_obs: int,
+) -> float:
+    """
+    Compute a candidate price using the current OLS fit and light exploration.
+    Pure function: does not mutate state.
+    """
+    # Cold start: no competitor info yet → midpoint.
+    if competitor_price is None:
+        return (P_MIN + P_MAX) / 2.0
+
+    # Exploit current fit: d ≈ α + β·p + γ·c
+    coefs = ols.coeffs()
+    if coefs is not None:
+        alpha, beta, gamma = coefs
+        if beta < 0.0:
+            p_star = - (alpha + gamma * float(competitor_price)) / (2.0 * beta)
+        else:
+            # Non-negative slope is suspicious → hug competitor.
+            p_star = float(competitor_price)
+    else:
+        # Not enough data yet → gentle undercut.
+        p_star = float(competitor_price) * 0.98
+
+    # ε-greedy exploration (decays with n).
+    eps = max(EPS_MIN, 1.0 / np.sqrt(max(1, n_obs)))
+    if np.random.random() < eps:
+        lo = _clamp(float(competitor_price) * 0.85, P_MIN, P_MAX)
+        hi = _clamp(float(competitor_price) * 1.15, P_MIN, P_MAX)
+        p_star = float(np.random.uniform(lo, hi))
+
+    # Bound + light damping for stability.
+    p_star = _clamp(p_star, P_MIN, P_MAX)
+    if last_price is not None:
+        p_star = 0.8 * float(last_price) + 0.2 * p_star
+
+    return _clamp(p_star, P_MIN, P_MAX)
+
 
 def p(
     current_selling_season: int,
@@ -129,7 +177,7 @@ def p(
     """
     Return next price and an opaque state object.
 
-    This is a minimal, platform-compliant scaffold. It returns a deterministic
+    This is a minimal, platform compliant scaffold. It returns a deterministic
     mid-price and persists a small, bounded state (ring buffer + online OLS).
     """
 
