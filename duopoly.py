@@ -7,6 +7,14 @@ P_MAX: float = 100.0
 # Keep only a small, recent window of observations to bound memory.
 WINDOW: int = 50
 
+DAMP: float = 0.20
+# default relative price when model isn't reliable yet
+UNDERCUT: float = 0.98
+# ε-exploration band vs competitor price
+EXPLORE_BAND: Tuple[float, float] = (0.85, 1.15)
+# uplift when competitor has no capacity
+MONOPOLY_UPLIFT: float = 1.10
+
 
 class RingBuffer:
     """
@@ -150,19 +158,23 @@ def choose_price(
             p_star = float(competitor_price)
     else:
         # Not enough data yet → gentle undercut.
-        p_star = float(competitor_price) * 0.98
+        p_star = float(competitor_price) * UNDERCUT
+
+    # If competitor is out of capacity, nudge toward a “monopoly-like” price.
+    if competitor_price is not None and not competitor_has_capacity:
+        p_star *= MONOPOLY_UPLIFT
 
     # ε-greedy exploration (decays with n).
     eps = max(EPS_MIN, 1.0 / np.sqrt(max(1, n_obs)))
     if np.random.random() < eps:
-        lo = _clamp(float(competitor_price) * 0.85, P_MIN, P_MAX)
-        hi = _clamp(float(competitor_price) * 1.15, P_MIN, P_MAX)
+        lo = _clamp(float(competitor_price) * EXPLORE_BAND[0], P_MIN, P_MAX)
+        hi = _clamp(float(competitor_price) * EXPLORE_BAND[1], P_MIN, P_MAX)
         p_star = float(np.random.uniform(lo, hi))
 
     # Bound + light damping for stability.
     p_star = _clamp(p_star, P_MIN, P_MAX)
     if last_price is not None:
-        p_star = 0.8 * float(last_price) + 0.2 * p_star
+        p_star = (1.0 - DAMP) * float(last_price) + DAMP * p_star
 
     return _clamp(p_star, P_MIN, P_MAX)
 
@@ -205,7 +217,7 @@ def p(
             # Skip malformed inputs gracefully.
             pass
 
-    #choose the next price using learned stats
+    # Choose the next price using learned stats.
     competitor_price: Optional[float] = None
     if prices_historical_in_current_season is not None and selling_period_in_current_season > 1:
         try:
