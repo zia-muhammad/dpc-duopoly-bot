@@ -2,9 +2,9 @@
 from typing import Any, Optional, Tuple, Union, List, Iterable
 import numpy as np
 
+# Explicit price bounds.
 P_MIN: float = 1.0
 P_MAX: float = 100.0
-
 # Keep only a small, recent window of observations to bound memory.
 WINDOW: int = 50
 
@@ -38,15 +38,84 @@ class RingBuffer:
     def items(self) -> Iterable[Tuple[float, float, float]]:
         """Yield items in chronological order (oldest → newest)."""
         if self._count < self._size:
-            # not wrapped yet
             for i in range(self._count):
                 yield self._buf[i]
             return
-        # wrapped: start at write index, then to end, then from 0 to idx-1
         for i in range(self._idx, self._size):
             yield self._buf[i]
         for i in range(0, self._idx):
             yield self._buf[i]
+
+
+class OnlineOLS3:
+    """
+    Online OLS for: demand ~ alpha + beta*my_price + gamma*comp_price
+
+    Maintains sufficient statistics so each add() is O(1). Memory is bounded via an
+    internal RingBuffer of size WINDOW.
+    """
+    __slots__ = ("_rb", "_n", "_sp", "_sc", "_spp", "_spc", "_scc", "_sd", "_spd", "_scd")
+
+    def __init__(self, size: int = WINDOW) -> None:
+        self._rb = RingBuffer(size)
+        self._n = 0.0
+        self._sp = 0.0   # sum p
+        self._sc = 0.0   # sum c
+        self._spp = 0.0  # sum p^2
+        self._spc = 0.0  # sum p*c
+        self._scc = 0.0  # sum c^2
+        self._sd = 0.0   # sum d
+        self._spd = 0.0  # sum p*d
+        self._scd = 0.0  # sum c*d
+
+    def _accum(self, p: float, c: float, d: float, sgn: float) -> None:
+        self._n += sgn
+        self._sp += sgn * p
+        self._sc += sgn * c
+        self._spp += sgn * p * p
+        self._spc += sgn * p * c
+        self._scc += sgn * c * c
+        self._sd += sgn * d
+        self._spd += sgn * p * d
+        self._scd += sgn * c * d
+
+    def add(self, p: float, c: float, d: float) -> None:
+        # Evict oldest if buffer full: subtract its contribution.
+        if len(self._rb) == self._rb._size:
+            # Oldest item is the first from items()
+            op, oc, od = next(self._rb.items())
+            self._accum(op, oc, od, -1.0)
+        self._rb.add((p, c, d))
+        self._accum(p, c, d, +1.0)
+
+    def count(self) -> int:
+        return len(self._rb)
+
+    def coeffs(self) -> Optional[Tuple[float, float, float]]:
+        """
+        Solve (X'X) * theta = X'y for theta = [alpha, beta, gamma].
+        Returns None if not enough data or matrix is ill-conditioned.
+        """
+        if self._n < 3:
+            return None
+
+        M = np.array(
+            [
+                [self._n,  self._sp,  self._sc],
+                [self._sp, self._spp, self._spc],
+                [self._sc, self._spc, self._scc],
+            ],
+            dtype=float,
+        )
+        v = np.array([self._sd, self._spd, self._scd], dtype=float)
+
+        try:
+            if np.linalg.cond(M) > 1e10:
+                return None
+            sol = np.linalg.solve(M, v)  # [alpha, beta, gamma]
+            return float(sol[0]), float(sol[1]), float(sol[2])
+        except Exception:
+            return None
 
 
 def p(
@@ -60,17 +129,17 @@ def p(
     """
     Return next price and an opaque state object.
 
-    This is a minimal, platform compliant scaffold. It returns a deterministic
-    mid-price and persists a tiny, bounded ring buffer of recent observations.
-    Later steps will add learning and policy on top of this stable interface.
+    This is a minimal, platform-compliant scaffold. It returns a deterministic
+    mid-price and persists a small, bounded state (ring buffer + online OLS).
     """
 
     price: float = (P_MIN + P_MAX) / 2.0
     state: dict = information_dump if isinstance(information_dump, dict) else {}
-    # Restore or create our small ring buffer.
+    # Restore/create bounded structures.
     rb: RingBuffer = state.get("rb") if isinstance(state.get("rb"), RingBuffer) else RingBuffer(WINDOW)
+    ols: OnlineOLS3 = state.get("ols") if isinstance(state.get("ols"), OnlineOLS3) else OnlineOLS3(WINDOW)
 
-    # If we are beyond period 1, record the last observed triple (my_price, comp_price, demand).
+    # If beyond period 1, record the last observation (my_price, comp_price, demand).
     if (
         selling_period_in_current_season > 1
         and prices_historical_in_current_season is not None
@@ -82,12 +151,14 @@ def p(
             d_last = float(demand_historical_in_current_season[-1])
             if np.isfinite(d_last) and d_last >= 0.0:
                 rb.add((my_last, comp_last, d_last))
+                ols.add(my_last, comp_last, d_last)
         except Exception:
-            # Stay robust to unexpected shapes/values; we simply skip the update.
+            # Skip malformed inputs gracefully.
             pass
 
     # Persist minimal state for the next call.
     state["rb"] = rb
-    state["version"] = 2  # simple internal state versioning
+    state["ols"] = ols
+    state["version"] = 3
 
     return float(price), state
