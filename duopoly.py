@@ -1,12 +1,26 @@
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Optional, Tuple, Union
+import numpy as np
 
-def p(information_dump: Optional[Dict[str, Any]] = None,
-      context: Optional[Dict[str, Any]] = None) -> Tuple[float, Dict[str, Any]]:
+
+P_MIN: float = 1.0
+P_MAX: float = 100.0
+
+
+def p(
+    current_selling_season: int,
+    selling_period_in_current_season: int,
+    prices_historical_in_current_season: Union[np.ndarray, None],
+    demand_historical_in_current_season: Union[np.ndarray, None],
+    competitor_has_capacity_current_period_in_current_season: bool,
+    information_dump: Optional[Any] = None,
+) -> Tuple[float, Any]:
     """
-    Minimal stub: returns a safe baseline price and round-trips a tiny state.
-    Real logic will be added in the next step.
+    Return next price and an opaque state object.
+
+    This is a minimal, platform compliant scaffold. Later steps will replace the
+    fixed price with learned logic while keeping the signature and state shape.
     """
-    state = information_dump or {"round": 0, "last_price": 5.0}
-    price = state["last_price"]
-    state["round"] += 1
+    price: float = (P_MIN + P_MAX) / 2.0
+    state: dict = information_dump if isinstance(information_dump, dict) else {}
+    state.setdefault("version", 1)
     return float(price), state
