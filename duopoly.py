@@ -116,6 +116,7 @@ class OnlineOLS3:
         except Exception:
             return None
 
+
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, float(x)))
 
@@ -177,12 +178,12 @@ def p(
     """
     Return next price and an opaque state object.
 
-    This is a minimal, platform compliant scaffold. It returns a deterministic
-    mid-price and persists a small, bounded state (ring buffer + online OLS).
+    This is a minimal, platform compliant scaffold. It persists a small, bounded
+    state (ring buffer + online OLS) and chooses a price using learned stats.
     """
-
-    price: float = (P_MIN + P_MAX) / 2.0
+    # Persistent state between calls.
     state: dict = information_dump if isinstance(information_dump, dict) else {}
+
     # Restore/create bounded structures.
     rb: RingBuffer = state.get("rb") if isinstance(state.get("rb"), RingBuffer) else RingBuffer(WINDOW)
     ols: OnlineOLS3 = state.get("ols") if isinstance(state.get("ols"), OnlineOLS3) else OnlineOLS3(WINDOW)
@@ -204,9 +205,28 @@ def p(
             # Skip malformed inputs gracefully.
             pass
 
+    #choose the next price using learned stats
+    competitor_price: Optional[float] = None
+    if prices_historical_in_current_season is not None and selling_period_in_current_season > 1:
+        try:
+            competitor_price = float(prices_historical_in_current_season[1, -1])
+        except Exception:
+            competitor_price = None
+
+    last_price: Optional[float] = state.get("last_price")
+
+    price: float = choose_price(
+        ols=ols,
+        competitor_price=competitor_price,
+        competitor_has_capacity=bool(competitor_has_capacity_current_period_in_current_season),
+        last_price=last_price,
+        n_obs=ols.count(),
+    )
+
     # Persist minimal state for the next call.
     state["rb"] = rb
     state["ols"] = ols
-    state["version"] = 3
+    state["last_price"] = float(price)
+    state["version"] = 4
 
     return float(price), state
